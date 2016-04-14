@@ -4,7 +4,7 @@
 #include "flint.h"
 #include "ulong_extras.h"
 #include "nmod_sparse_mat.h"
-#define MZD_MUL_CUTOFF 4096
+#define MZD_MUL_CUTOFF 0
 
 static inline double myrand() {
     /* ******************************************************************
@@ -35,20 +35,64 @@ nmod_sparse_mat_mul_m4ri_mat_w1(mzd_t* C, const nmod_sparse_mat_t A, const mzd_t
     for (i = 0; i < A->r; i++)
     {
         for (k = 0; k < A->row_supports[i]; k++)
-        {
-            /*mzd_xor_bits(C, i, j, m4ri_radix, *(mzd_row(B, A->rows[i][k].pos) + j));*/
             C->rows[i][0] ^= B->rows[A->rows[i][k].pos][0];
-        }
     }
 }
 void
+clever(word *restrict a, word *restrict b)
+{
+    a[0] ^= b[0];
+    a[1] ^= b[1];
+}
+
+void
+nmod_sparse_mat_mul_m4ri_mat_w2(mzd_t* C, const nmod_sparse_mat_t A, const mzd_t *B)
+{
+    int i, k;
+    for (i = 0; i < A->r; i++)
+    {
+        for (k = 0; k < A->row_supports[i]; k++)
+        {
+            C->rows[i][0] ^= B->rows[A->rows[i][k].pos][0];
+            C->rows[i][1] ^= B->rows[A->rows[i][k].pos][1];
+        }
+    }
+}
+
+void
+nmod_sparse_mat_mul_m4ri_mat_w4(mzd_t* C, const nmod_sparse_mat_t A, const mzd_t *B)
+{
+    int i, k;
+    for (i = 0; i < A->r; i++)
+    {
+        for (k = 0; k < A->row_supports[i]; k++)
+        {
+            C->rows[i][0] ^= B->rows[A->rows[i][k].pos][0];
+            C->rows[i][1] ^= B->rows[A->rows[i][k].pos][1];
+            C->rows[i][2] ^= B->rows[A->rows[i][k].pos][2];
+            C->rows[i][3] ^= B->rows[A->rows[i][k].pos][3];
+        }
+    }
+}
+
+void
 nmod_sparse_mat_mul_m4ri_mat(mzd_t* C, const nmod_sparse_mat_t A, const mzd_t *B)
 {
-    int i, j, k;
+    int i, k;
     mzd_set_ui(C, 0);
     if (B->width == 1)
     {
         nmod_sparse_mat_mul_m4ri_mat_w1(C, A, B);
+        return;
+    }
+    else if (B->width == 2)
+    {
+        nmod_sparse_mat_mul_m4ri_mat_w2(C, A, B);
+        return;
+    }
+    else if (B->width == 4)
+    {
+        nmod_sparse_mat_mul_m4ri_mat_w4(C, A, B);
         return;
     }
 
@@ -56,11 +100,7 @@ nmod_sparse_mat_mul_m4ri_mat(mzd_t* C, const nmod_sparse_mat_t A, const mzd_t *B
     {
         for (k = 0; k < A->row_supports[i]; k++)
         {
-            const int p = A->rows[i][k].pos;
-            for (j = 0; j < B->width; j++)
-            {
-                C->rows[i][j] ^= B->rows[p][j];
-            }
+            mzd_combine_even_in_place(C, i, 0, B, A->rows[i][k].pos, 0);
         }
     }
 }
@@ -173,7 +213,7 @@ void
 bw(mzd_t *K, const nmod_sparse_mat_t M)
 {
     mzd_t *e, *x, *id, *zero, **mtz, **mty, **xmty, **P, **f;
-    const slong N = M->r, m = 64, n = 64;
+    const slong N = M->r, m = 64<<1, n = 64<<1;
     slong i, j;
     const int skip = 1, epsilon = 1;
     int done = 0, ftries, t = (m + n - 1)/n + skip, delta[m + n];
@@ -249,26 +289,7 @@ bw(mzd_t *K, const nmod_sparse_mat_t M)
     {
         mzd_t * f_tmp;
 
-#if 0
-        {//debug printing
-            vector<mzd_t *> g;
-            debug<<"Printing figure"<<" t "<<t<<" smallest t-deltaj:"<< t-delta.max()<<"\n";
-            debug<<"AX.size()="<<(int)AX.size()<<"\n";
-            debug<<"f.size()="<<(int)f.size()<<"\n";
-            for (int i=0;i<100;i++)g.push_back(ithCoefficientOfVectorPolynomialProduct(B.getField(),m,m+n,AX,f,i));
-            for (int i=0;i<m+n;i++)
-            {
-                debug<<i<<"\tdelta="<<delta[i]<<"\t"<<"degf "<<degreeOfIthColumn(f,i)<<" "<<degreeOfIthColumnREV(f,i)<<"\t";
-                assert(degreeOfIthColumn(f,i)<=delta[i]);
-                for (int j=0;j<100;j++)
-                    debug<<(g[j].transposed()[i].isZero()?" ":"*");
-                debug<<"|\n";
-            }
-        }
-#endif
-
-        /*mzd_t * e = ithCoefficientOfVectorPolynomialProduct(B.getField(),m,m+n,AX,f,t);
-         * */
+        /*mzd_t * e = ithCoefficientOfVectorPolynomialProduct(B.getField(),m,m+n,AX,f,t); */
 
         if (done) /* first run only */
         {
@@ -350,11 +371,10 @@ bw(mzd_t *K, const nmod_sparse_mat_t M)
         }
 
         /*if (!w.transposed()[0].isZero() && (M*w).transposed()[0].isZero())*/
-        mzd_transpose(w, wT);
-        mzd_set_ui(Mw, 0);
-        nmod_sparse_mat_mul_m4ri_mat(Mw, M, w); /* TODO can we use existing knowledge here */
-        if (!mzd_is_zero(w))
+        if (!mzd_is_zero(wT))
         {
+            mzd_transpose(w, wT);
+            nmod_sparse_mat_mul_m4ri_mat(Mw, M, w); /* TODO can we use existing knowledge here */
             if (mzd_is_zero(Mw))
             {
                 printf("win");
@@ -396,7 +416,7 @@ main(int argc, char * argv[])
 {
     nmod_sparse_mat_t M;
     n_primes_t primes;
-    slong N = 12800, i, j;
+    slong N = 64000, i, j;
     mp_limb_t p;
     float prob;
     mzd_t *K;
@@ -412,7 +432,7 @@ main(int argc, char * argv[])
     {
     for (p = n_primes_next(primes), i = 0; i < N; p = n_primes_next(primes), i++)
     {
-        prob = 1.0f - pow(1.0f - 2.0f/(float)p, 8);
+        prob = 1.0f - pow(1.0f - 6.0f/(float)p, 8);
         for (j = 0; j < M->r; j++)
         {
             if (myrand() < prob)
