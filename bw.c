@@ -278,8 +278,6 @@ _bw(mzd_t *K, const nmod_sparse_mat_t M, const int skip, const int epsilon, cons
         }
 
         ALGO1(P, e, delta);
-        mzd_print(P[0]);
-        mzd_print(P[1]);
 
         /* f = productWithLinear(B.getField(), n, m + n, f, P);*/
         f = (mzd_t **)realloc(f, (t + 2) * sizeof(mzd_t *));
