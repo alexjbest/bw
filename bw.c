@@ -190,8 +190,8 @@ berlekamp_massey(mzd_t ** qi, mzd_t **mty, const slong size)
 void
 _bw(mzd_t *K, const nmod_sparse_mat_t M, const int skip, const int epsilon, const int m_shift, const int n_shift)
 {
-    mzd_t *e, *x, *id, *zero, **mtz, **mty, **xmty, **P, **f;
-    const slong N = M->r, m = 2 << m_shift, n = 2 << n_shift;
+    mzd_t *e, *x, **mtz, **mty, **xmty, **P, *F, *Ftmp1, *Ftmp2;
+    const slong N = M->r, m = 1 << m_shift, n = 1 << n_shift;
     slong i, j, count = 0;
     int done = 0, ftries, t = (m + n - 1)/n + skip, delta[m + n];
     int L = (N+m-1)/m + N/n + epsilon, max_diff;
@@ -203,7 +203,6 @@ _bw(mzd_t *K, const nmod_sparse_mat_t M, const int skip, const int epsilon, cons
     mty = &mtz[1];
     xmty = (mzd_t **)malloc(L * sizeof(mzd_t *));
     P = (mzd_t **)malloc(2 * sizeof(mzd_t *)); /* a pair of matrices */
-    f = (mzd_t **)malloc((t + 1) * sizeof(mzd_t *));
     P[0] = mzd_init(m + n, m + n);
     P[1] = mzd_init(m + n, m + n);
     mtz[0] = mzd_init(N, n);
@@ -214,18 +213,12 @@ _bw(mzd_t *K, const nmod_sparse_mat_t M, const int skip, const int epsilon, cons
         xmty[i] = mzd_init(m, n);
     }
 
-    for (i = 0; i <= t; i++)
-        f[i] = mzd_init(n, m + n);
+    F = mzd_init(n * (t + 1), m + n);
+    Ftmp1 = mzd_init(n * (t + 1), m + n);
+    Ftmp2 = mzd_init(n * (t + 1), m + n);
 
     for (i = 0; i < n + m; i++)
         delta[i] = t;
-
-    zero = mzd_init(n, m);
-    id = mzd_init(n, n);
-    mzd_set_ui(id, 1);
-    mzd_concat(f[t], zero, id);
-    mzd_free(id);
-    mzd_free(zero);
 
     e = mzd_init(m, m + n);
     while (!done)
@@ -242,15 +235,25 @@ _bw(mzd_t *K, const nmod_sparse_mat_t M, const int skip, const int epsilon, cons
 
         for (ftries = 0; ftries <= 10 && !done; ftries++)
         {
-            mzd_mul(e, xmty[0], f[t], MZD_MUL_CUTOFF);
             mzd_t * m_cols;
-            for (i = 0; i < t; i++)
+            mzd_randomize(F);
+            for (j = 0; j < F->nrows - n; j++)
+                mzd_row_clear_offset(F, j, m);
+            for (; j < F->nrows; j++)
+                mzd_row_clear_offset(F, j, 0);
+
+            mzd_t * fid = mzd_init_window(F, F->nrows - n, m, F->nrows, n + m);
+            mzd_set_ui(fid, 1);
+            mzd_free_window(fid);
+
+            mzd_set_ui(e, 0);
+
+            for (i = 0; i <= t; i++)
             {
                 /*ithCoefficientOfVectorPolynomialProduct(B.getField(),m,m+n,AX,f,t);*/
-                mzd_randomize(f[i]);
-                for (j = 0; j < f[i]->nrows; j++)
-                    mzd_row_clear_offset(f[i], j, m);
-                mzd_addmul(e, xmty[t - i], f[i], MZD_MUL_CUTOFF);
+                mzd_t * fi = mzd_init_window(F, i * n, 0, (i + 1) * n, n + m);
+                mzd_addmul(e, xmty[t - i], fi, MZD_MUL_CUTOFF);
+                mzd_free_window(fi);
             }
 
 
@@ -262,8 +265,6 @@ _bw(mzd_t *K, const nmod_sparse_mat_t M, const int skip, const int epsilon, cons
 
     for (max_diff = 0; max_diff <= N/m; t++, max_diff++)
     {
-        mzd_t * f_tmp;
-
         /*mzd_t * e = ithCoefficientOfVectorPolynomialProduct(B.getField(),m,m+n,AX,f,t); */
 
         if (done) /* first run only */
@@ -274,12 +275,31 @@ _bw(mzd_t *K, const nmod_sparse_mat_t M, const int skip, const int epsilon, cons
         {
             mzd_set_ui(e, 0);
             for (i = 0; i <= t; i++)
-                mzd_addmul(e, xmty[t - i], f[i], MZD_MUL_CUTOFF);
+            {
+                mzd_t * fi = mzd_init_window(F, i * n, 0, (i + 1) * n, n + m);
+                mzd_addmul(e, xmty[t - i], fi, MZD_MUL_CUTOFF);
+                mzd_free_window(fi);
+            }
         }
 
         ALGO1(P, e, delta);
 
         /* f = productWithLinear(B.getField(), n, m + n, f, P);*/
+        while (F->nrows < (t + 2) * n)
+        {
+            rci_t new_len = (t + t/20 + 2) * n;
+
+            mzd_free(Ftmp1);
+            mzd_free(Ftmp2);
+            Ftmp1 = mzd_init(new_len, m + n);
+            Ftmp2 = mzd_init(new_len, m + n);
+            for (i = 0; i < (t + 1) * n; i++)
+                mzd_copy_row(Ftmp1, i, F, i);
+            mzd_free(F);
+            F = Ftmp1;
+            Ftmp1 = mzd_init(new_len, m + n);
+        }
+        /*
         f = (mzd_t **)realloc(f, (t + 2) * sizeof(mzd_t *));
         f[t + 1] = mzd_init(n, m + n);
         f_tmp = mzd_init(n, m + n);
@@ -292,6 +312,14 @@ _bw(mzd_t *K, const nmod_sparse_mat_t M, const int skip, const int epsilon, cons
         }
         mzd_mul(f_tmp, f[0], P[0], MZD_MUL_CUTOFF);
         mzd_copy(f[0], f_tmp);
+        mzd_free(f_tmp);*/
+        mzd_mul(Ftmp1, F, P[0], MZD_MUL_CUTOFF);
+        mzd_mul(Ftmp2, F, P[1], MZD_MUL_CUTOFF);
+        for (i = 0; i <= t * n; i++)
+            mzd_combine_even_in_place(Ftmp1, i + n, 0, Ftmp2, i, 0);
+        mzd_t *tmp_p = F;
+        F = Ftmp1;
+        Ftmp1 = tmp_p;
 
         max_diff = 0;
         for (i = 0; i < m + n; i++)
@@ -309,7 +337,6 @@ _bw(mzd_t *K, const nmod_sparse_mat_t M, const int skip, const int epsilon, cons
                 max_diff = t - delta[i];
         }
 
-        mzd_free(f_tmp);
     }
 
     /* extract kernel vector */
@@ -324,14 +351,19 @@ _bw(mzd_t *K, const nmod_sparse_mat_t M, const int skip, const int epsilon, cons
     for (j = 0; j < L + 1; j++)
         mtzT[j] = mzd_transpose(NULL, mtz[j]);
     for (j = 0; j < t + 1; j++)
-        fT[j] = mzd_transpose(NULL, f[j]);
+    {
+        mzd_t * fj = mzd_init_window(F, j * n, 0, (j + 1)*n, n + m);
+        fT[j] = mzd_transpose(NULL, fj);
+        mzd_free_window(fj);
+    }
+
     for (j = 0; j < m + n; j++)
     {
         /*printf("%ld, %d, %d\n", j, delta[j], t- delta[j]);*/
         mzd_set_ui(wT, 0);
         for (i = 0; i <= delta[j]; i++)
         {
-            f_w = mzd_init_window(fT[i], j, 0, j + 1, f[i]->nrows);
+            f_w = mzd_init_window(fT[i], j, 0, j + 1, fT[i]->ncols);
             /*printf("%ld, %d\n", delta[j] - i, L);*/
             _mzd_mul_va(wT, f_w , mtzT[delta[j] - i], 0);
             mzd_free_window(f_w);
@@ -360,11 +392,10 @@ _bw(mzd_t *K, const nmod_sparse_mat_t M, const int skip, const int epsilon, cons
     free(mtzT);
     free(fT);
     mzd_free(w);
+    mzd_free(wT);
     mzd_free(Mw);
 
     /* cleanup */
-    for (i = 0; i <= t; i++)
-        mzd_free(f[i]);
 
     mzd_free(mtz[0]);
     for (i = 0; i < L; i++)
@@ -377,14 +408,16 @@ _bw(mzd_t *K, const nmod_sparse_mat_t M, const int skip, const int epsilon, cons
     mzd_free(x);
     mzd_free(P[0]);
     mzd_free(P[1]);
+    mzd_free(Ftmp1);
+    mzd_free(Ftmp2);
+    mzd_free(F);
     free(mtz);
     free(xmty);
     free(P);
-    free(f);
 }
 
 void
 bw(mzd_t *K, const nmod_sparse_mat_t M)
 {
-    _bw(K, M, 1, 1, 8, 8);
+    _bw(K, M, 1, 1, 7, 7);
 }
