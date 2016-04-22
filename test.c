@@ -46,25 +46,25 @@ main(int argc, char * argv[])
     */
     if (1)
     {
-    for (p = n_primes_next(primes), i = 0; i < N; p = n_primes_next(primes), i++)
-    {
-        prob = 1.0f - pow(1.0f - 6.0f/(float)p, 8);
-        for (j = 0; j < M->c; j++)
+        for (p = n_primes_next(primes), i = 0; i < N; p = n_primes_next(primes), i++)
         {
-            if (myrand() < prob)
+            prob = 1.0f - pow(1.0f - 6.0f/(float)p, 8);
+            for (j = 0; j < M->c; j++)
             {
-                _nmod_sparse_mat_set_entry(M, i, j, M->row_supports[i], 1);
+                if (myrand() < prob)
+                {
+                    _nmod_sparse_mat_set_entry(M, i, j, M->row_supports[i], 1);
+                }
             }
         }
     }
-    }
     else
     {
-    for (j = 1; j < N; j++)
-    {
-        _nmod_sparse_mat_set_entry(M, j, 0, 0, 1);
-        _nmod_sparse_mat_set_entry(M, j, j, 1, 1);
-    }
+        for (j = 1; j < N; j++)
+        {
+            _nmod_sparse_mat_set_entry(M, j, 0, 0, 1);
+            _nmod_sparse_mat_set_entry(M, j, j, 1, 1);
+        }
     }
 
 
@@ -77,6 +77,8 @@ main(int argc, char * argv[])
     mzd_free(K);
 
     nmod_sparse_mat_clear(M);
+
+    n_primes_clear(primes);
 
     return 0;
 }
