@@ -52,43 +52,48 @@ _qseive(const mp_limb_t n, const mp_limb_t B)
     printf("procesing complete\n");
     mzd_print(K);
 
-    fmpz_t a, b, diff, N;
-    fmpz_init_set_ui(a, 1);
-    fmpz_init_set_ui(b, 1);
-    fmpz_init_set_ui(N, n);
-    fmpz_init(diff);
-    for (i = 0; i < piB; i++)
+    int done = 0;
+    for (j = 0; !done; j++)
     {
-        if (mzd_read_bit(K, i, 0))
+        fmpz_t a, b, diff, N;
+        fmpz_init_set_ui(a, 1);
+        fmpz_init_set_ui(b, 1);
+        fmpz_init_set_ui(N, n);
+        fmpz_init(diff);
+        for (i = 0; i < piB; i++)
         {
-            fmpz_mul_ui(a, a, xs[i]);
-            fmpz_mul_ui(b, b, quads[i]);
+            if (mzd_read_bit(K, i, j))
+            {
+                fmpz_mul_ui(a, a, xs[i]);
+                fmpz_mul_ui(b, b, quads[i]);
+            }
         }
+        assert(fmpz_is_square(b));
+        fmpz_sqrt(b, b);
+        if (fmpz_mod_ui(a, a, n) != fmpz_mod_ui(b, b, n) && fmpz_mod_ui(a, a, n) != n - fmpz_mod_ui(b, b, n))
+        {
+            done = 1;
+
+            fmpz_print(a);
+            printf("\n");
+            fmpz_print(b);
+            printf("\n");
+            fmpz_sub(diff, a, b);
+            fmpz_gcd(a, diff, N);
+            fmpz_divexact(b, N, a);
+            fmpz_print(a);
+            printf("\n");
+            fmpz_print(b);
+        }
+
+        fmpz_clear(a);
+        fmpz_clear(b);
+        fmpz_clear(N);
+        fmpz_clear(diff);
     }
-    assert(fmpz_is_square(b));
-    fmpz_sqrt(b, b);
-    if (fmpz_mod_ui(a, a, n) == fmpz_mod_ui(b, b, n) || fmpz_mod_ui(a, a, n) == n - fmpz_mod_ui(b, b, n))
-        printf("failed\n");
-
-    fmpz_print(a);
-    printf("\n");
-    fmpz_print(b);
-    printf("\n");
-    fmpz_sub(diff, a, b);
-    fmpz_gcd(a, diff, N);
-    fmpz_divexact(b, N, a);
-    fmpz_print(a);
-    printf("\n");
-    fmpz_print(b);
-
     /* cleanup */
     free(quads);
     free(xs);
-
-    fmpz_clear(a);
-    fmpz_clear(b);
-    fmpz_clear(N);
-    fmpz_clear(diff);
 
     mzd_free(K);
 

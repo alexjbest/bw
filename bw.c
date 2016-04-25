@@ -6,6 +6,42 @@
 #include "nmod_sparse_mat.h"
 #define MZD_MUL_CUTOFF 0
 
+#define BW_USE_THREADS 1
+
+#if BW_USE_THREADS
+#include <pthread.h>
+#define BW_NUM_THREADS 4
+
+enum work_type {
+    DOT_PRODUCT,
+    DENSE_MUL,
+    SPARSE_MUL
+};
+
+struct work_args {
+    enum work_type type;
+    slong i0, i1, t;
+    mzd_t * e;
+    mzd_t * F;
+    mzd_t ** xmty;
+};
+
+void *thread_do_work(void *wa)
+{
+    struct work_args *my_args;
+    my_args = (struct work_args *) wa;
+    slong i, m = my_args->e->nrows, n = my_args->e->ncols - m;
+    for (i = my_args->i0; i <= my_args->i1; i++)
+    {
+        mzd_t * fi = mzd_init_window(my_args->F, i * n, 0, (i + 1) * n, n + m);
+        mzd_addmul(my_args->e, my_args->xmty[my_args->t - i], fi, MZD_MUL_CUTOFF);
+        mzd_free_window(fi);
+    }
+    pthread_exit(NULL);
+}
+
+#endif
+
 void
 nmod_sparse_mat_mul_m4ri_mat_w1(mzd_t* C, const nmod_sparse_mat_t A, const mzd_t *B)
 {
@@ -189,14 +225,6 @@ ALGO1(mzd_t * P, mzd_t * Xe, int * delta, int * busy)
 }
 
 /*
-slong
-berlekamp_massey(mzd_t ** qi, mzd_t **mty, const slong size)
-{
-    return 0;
-}
-*/
-
-/*
  * This is an implementation of Coppersmith's block Wiedemann algorithm.
  * It follows the article "Fast computation of linear generators for matrix sequences
  * and application to the block Wiedemann algorithm" by Emmanuel Thome.
@@ -210,6 +238,7 @@ _bw(mzd_t *K, const nmod_sparse_mat_t M, const int skip, const int epsilon, cons
     int done = 0, ftries, t = (m + n - 1)/n + skip, delta[m + n], busy[m + n];
     int L = (N+m-1)/m + N/n + epsilon, max_diff;
     /* TODO check the correct things are const */
+
 
     /* set up dense matrices */
     x = mzd_init(m, N);
@@ -286,13 +315,44 @@ _bw(mzd_t *K, const nmod_sparse_mat_t M, const int skip, const int epsilon, cons
         else
         {
             mzd_set_ui(e, 0);
+#if BW_USE_THREADS
+            pthread_t threads[BW_NUM_THREADS];
+
+            pthread_attr_t attr;
+            pthread_attr_init(&attr);
+            pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE);
+
+            struct work_args args[BW_NUM_THREADS];
+            void *status;
+            for (i = 0; i < BW_NUM_THREADS; i++)
+            {
+                args[i].xmty = xmty;
+                args[i].F = F;
+                args[i].i0 = i * ((t + 1) / BW_NUM_THREADS);
+                args[i].i1 = (i + 1) * ((t + 1) / BW_NUM_THREADS) - 1;
+                if (i == BW_NUM_THREADS - 1)
+                    args[i].i1 = t;
+                args[i].t = t;
+                args[i].e = mzd_init(m, m + n);
+                pthread_create(&threads[i], &attr, thread_do_work, (void *)&args[i]);
+            }
+            pthread_attr_destroy(&attr);
+            for (i = 0; i < BW_NUM_THREADS; i++)
+            {
+                pthread_join(threads[i], &status);
+                mzd_add(e, e, args[i].e);
+                mzd_free(args[i].e);
+            }
+#else
             for (i = 0; i <= t; i++)
             {
                 mzd_t * fi = mzd_init_window(F, i * n, 0, (i + 1) * n, n + m);
                 mzd_addmul(e, xmty[t - i], fi, MZD_MUL_CUTOFF);
                 mzd_free_window(fi);
             }
+#endif
         }
+
 
         ALGO1(P, e, delta, busy);
 
@@ -362,11 +422,9 @@ _bw(mzd_t *K, const nmod_sparse_mat_t M, const int skip, const int epsilon, cons
             nmod_sparse_mat_mul_m4ri_mat(Mw, M, w); /* TODO can we use existing knowledge here */
             if (mzd_is_zero(Mw))
             {
-                count++;
                 for (i = 0; i < w->nrows; i++)
-                {
-                    mzd_write_bit(K, i, 0, mzd_read_bit(w, i, 0));
-                }
+                    mzd_write_bit(K, i, count, mzd_read_bit(w, i, 0));
+                count++;
             }
         }
     }
@@ -397,6 +455,8 @@ _bw(mzd_t *K, const nmod_sparse_mat_t M, const int skip, const int epsilon, cons
     mzd_free(F);
     free(mtz);
     free(xmty);
+
+
 }
 
 void
