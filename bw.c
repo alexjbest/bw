@@ -1,16 +1,19 @@
+#define _XOPEN_SOURCE 600
 #include <stdio.h>
 #include <gmp.h>
 #include "m4ri.h"
 #include "flint.h"
 #include "ulong_extras.h"
 #include "nmod_sparse_mat.h"
-#define MZD_MUL_CUTOFF 0
 
+#define MZD_MUL_CUTOFF 0
 #define BW_USE_THREADS 1
 
 #if BW_USE_THREADS
 #include <pthread.h>
+
 #define BW_NUM_THREADS 4
+#define BW_PARALLEL_DOT_CUTOFF 50
 
 enum work_type {
     DOT_PRODUCT,
@@ -26,7 +29,13 @@ struct work_args {
     mzd_t ** xmty;
 };
 
-void *thread_do_work(void *wa)
+pthread_mutex_t jobs_mutex;
+pthread_barrier_t barrier;
+pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
+int num_jobs = 0, jobs_done = 0;
+struct work_args args[BW_NUM_THREADS];
+
+void thread_do_work(void *wa)
 {
     struct work_args *my_args;
     my_args = (struct work_args *) wa;
@@ -37,7 +46,39 @@ void *thread_do_work(void *wa)
         mzd_addmul(my_args->e, my_args->xmty[my_args->t - i], fi, MZD_MUL_CUTOFF);
         mzd_free_window(fi);
     }
-    pthread_exit(NULL);
+}
+
+void *thread_check_work()
+{
+    int index = 0;
+    while (1)
+    {
+        pthread_mutex_lock(&jobs_mutex);
+        while (1)
+        {
+            if (num_jobs == -1) /* threads terminating */
+            {
+                pthread_mutex_unlock(&jobs_mutex);
+                pthread_exit(NULL);
+            }
+            else if (num_jobs == 0) /* no work to be done */
+            {
+                /* Block on cond */
+                pthread_cond_wait(&cond, &jobs_mutex);
+            }
+            else /* we have work */
+            {
+                break;
+            }
+        }
+        index = num_jobs - 1; /* we will do this job */
+        num_jobs--;
+        pthread_mutex_unlock(&jobs_mutex);
+
+        thread_do_work(&args[index]);
+
+        pthread_barrier_wait(&barrier);
+    }
 }
 
 #endif
@@ -239,7 +280,6 @@ _bw(mzd_t *K, const nmod_sparse_mat_t M, const int skip, const int epsilon, cons
     int L = (N+m-1)/m + N/n + epsilon, max_diff;
     /* TODO check the correct things are const */
 
-
     /* set up dense matrices */
     x = mzd_init(m, N);
     mtz = (mzd_t **)malloc((L + 1) * sizeof(mzd_t *));
@@ -259,6 +299,22 @@ _bw(mzd_t *K, const nmod_sparse_mat_t M, const int skip, const int epsilon, cons
 
     for (i = 0; i < n + m; i++)
         delta[i] = t;
+
+#if BW_USE_THREADS
+    pthread_barrier_init(&barrier, NULL, BW_NUM_THREADS + 1);
+    pthread_mutex_init(&jobs_mutex, NULL);
+    void *status;
+
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE);
+    pthread_t threads[BW_NUM_THREADS];
+    for (i = 0; i < BW_NUM_THREADS; i++)
+    {
+        pthread_create(&threads[i], &attr, thread_check_work, NULL);
+        args[i].xmty = xmty;
+    }
+#endif
 
     e = mzd_init(m, m + n);
     while (!done)
@@ -307,7 +363,7 @@ _bw(mzd_t *K, const nmod_sparse_mat_t M, const int skip, const int epsilon, cons
     {
         /*mzd_t * e = ithCoefficientOfVectorPolynomialProduct(B.getField(),m,m+n,AX,f,t); */
 
-        /* update error term */
+        /* update error term TODO reorder*/
         if (done) /* first run only */
         {
             done = 0;
@@ -315,42 +371,45 @@ _bw(mzd_t *K, const nmod_sparse_mat_t M, const int skip, const int epsilon, cons
         else
         {
             mzd_set_ui(e, 0);
+
 #if BW_USE_THREADS
-            pthread_t threads[BW_NUM_THREADS];
+            if (((t + 1) / BW_NUM_THREADS) >= BW_PARALLEL_DOT_CUTOFF)
+            {
+                pthread_mutex_lock(&jobs_mutex);
+                for (i = 0; i < BW_NUM_THREADS; i++)
+                {
+                    args[i].F = F;
+                    args[i].i0 = i * ((t + 1) / BW_NUM_THREADS);
+                    args[i].i1 = (i + 1) * ((t + 1) / BW_NUM_THREADS) - 1;
+                    if (i == BW_NUM_THREADS - 1)
+                        args[i].i1 = t;
+                    args[i].t = t;
+                    args[i].e = mzd_init(m, m + n);
+                }
+                num_jobs = BW_NUM_THREADS;
+                jobs_done = 0;
 
-            pthread_attr_t attr;
-            pthread_attr_init(&attr);
-            pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE);
+                pthread_cond_broadcast(&cond);
+                pthread_mutex_unlock(&jobs_mutex);
 
-            struct work_args args[BW_NUM_THREADS];
-            void *status;
-            for (i = 0; i < BW_NUM_THREADS; i++)
-            {
-                args[i].xmty = xmty;
-                args[i].F = F;
-                args[i].i0 = i * ((t + 1) / BW_NUM_THREADS);
-                args[i].i1 = (i + 1) * ((t + 1) / BW_NUM_THREADS) - 1;
-                if (i == BW_NUM_THREADS - 1)
-                    args[i].i1 = t;
-                args[i].t = t;
-                args[i].e = mzd_init(m, m + n);
-                pthread_create(&threads[i], &attr, thread_do_work, (void *)&args[i]);
+                pthread_barrier_wait(&barrier);
+
+                for (i = 0; i < BW_NUM_THREADS; i++)
+                {
+                    mzd_add(e, e, args[i].e);
+                    mzd_free(args[i].e);
+                }
             }
-            pthread_attr_destroy(&attr);
-            for (i = 0; i < BW_NUM_THREADS; i++)
-            {
-                pthread_join(threads[i], &status);
-                mzd_add(e, e, args[i].e);
-                mzd_free(args[i].e);
-            }
-#else
-            for (i = 0; i <= t; i++)
-            {
-                mzd_t * fi = mzd_init_window(F, i * n, 0, (i + 1) * n, n + m);
-                mzd_addmul(e, xmty[t - i], fi, MZD_MUL_CUTOFF);
-                mzd_free_window(fi);
-            }
+            else
 #endif
+            {
+                for (i = 0; i <= t; i++)
+                {
+                    mzd_t * fi = mzd_init_window(F, i * n, 0, (i + 1) * n, n + m);
+                    mzd_addmul(e, xmty[t - i], fi, MZD_MUL_CUTOFF);
+                    mzd_free_window(fi);
+                }
+            }
         }
 
 
@@ -385,6 +444,20 @@ _bw(mzd_t *K, const nmod_sparse_mat_t M, const int skip, const int epsilon, cons
 
     }
 
+    /* we are finished with threads */
+#if BW_USE_THREADS
+    pthread_mutex_lock(&jobs_mutex);
+    num_jobs = -1;
+    pthread_cond_broadcast(&cond);
+    pthread_mutex_unlock(&jobs_mutex);
+
+    for (i = 0; i < BW_NUM_THREADS; i++)
+        pthread_join(threads[i], &status);
+    pthread_cond_destroy(&cond);
+    pthread_mutex_destroy(&jobs_mutex);
+    pthread_attr_destroy(&attr);
+#endif
+
     /* extract kernel vector */
     printf("fin\n");
 
@@ -403,15 +476,18 @@ _bw(mzd_t *K, const nmod_sparse_mat_t M, const int skip, const int epsilon, cons
         mzd_free_window(fj);
     }
 
+        mzd_t * wMT = mzd_init(wT->nrows, wT->ncols);
     for (j = 0; j < m + n; j++)
     {
         /*printf("%ld, %d, %d\n", j, delta[j], t- delta[j]);*/
         mzd_set_ui(wT, 0);
+        mzd_set_ui(wMT, 0);
         for (i = 0; i <= delta[j]; i++)
         {
             f_w = mzd_init_window(fT[i], j, 0, j + 1, fT[i]->ncols);
             /*printf("%ld, %d\n", delta[j] - i, L);*/
-            _mzd_mul_va(wT, f_w , mtzT[delta[j] - i], 0);
+            _mzd_mul_va(wT, f_w, mtzT[delta[j] - i], 0);
+            /*_mzd_mul_va(wMT, f_w, mtzT[delta[j] - i + 1], 0);*/
             mzd_free_window(f_w);
         }
 
@@ -419,7 +495,8 @@ _bw(mzd_t *K, const nmod_sparse_mat_t M, const int skip, const int epsilon, cons
         if (!mzd_is_zero(wT))
         {
             mzd_transpose(w, wT);
-            nmod_sparse_mat_mul_m4ri_mat(Mw, M, w); /* TODO can we use existing knowledge here */
+            /*mzd_transpose(Mw, wMT);*/
+            nmod_sparse_mat_mul_m4ri_mat(Mw, M, w);/*  TODO can we use existing knowledge here */
             if (mzd_is_zero(Mw))
             {
                 for (i = 0; i < w->nrows; i++)
@@ -428,6 +505,7 @@ _bw(mzd_t *K, const nmod_sparse_mat_t M, const int skip, const int epsilon, cons
             }
         }
     }
+        mzd_free(wMT);
     printf("found %ld kernel vecs:\n", count);
     for (j = 0; j < t + 1; j++)
         mzd_free(fT[j]);
@@ -455,8 +533,6 @@ _bw(mzd_t *K, const nmod_sparse_mat_t M, const int skip, const int epsilon, cons
     mzd_free(F);
     free(mtz);
     free(xmty);
-
-
 }
 
 void
