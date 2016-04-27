@@ -1,7 +1,9 @@
+#define _XOPEN_SOURCE 600
 #include <stdio.h>
 #include <gmp.h>
 #include "bw.h"
 #include "ulong_extras.h"
+#include <time.h>
 
 static inline double myrand() {
     /* ******************************************************************
@@ -30,10 +32,12 @@ main(int argc, char * argv[])
 {
     nmod_sparse_mat_t M;
     n_primes_t primes;
-    slong N = 64000, i, j;
+    slong N = atoi(argv[1]), i, j;
     mp_limb_t p;
     float prob;
     mzd_t *K;
+    struct timespec start, finish;
+    double elapsed;
 
     printf("using %ldx%ld matrix\n", N, N);
 
@@ -72,7 +76,16 @@ main(int argc, char * argv[])
 
     K = mzd_init(N, 1);
 
+    clock_gettime(CLOCK_MONOTONIC, &start);
+
     bw(K, M);
+
+    clock_gettime(CLOCK_MONOTONIC, &finish);
+
+    elapsed = (finish.tv_sec - start.tv_sec);
+    elapsed += (finish.tv_nsec - start.tv_nsec) / 1000000000.0;
+
+    printf("%lf secs taken\n", elapsed);
 
     mzd_free(K);
 
